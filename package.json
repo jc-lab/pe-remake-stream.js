@@ -10,7 +10,8 @@
     "test:mocha": "mocha -r ts-node/register --recursive ./test/**/*.ts",
     "test": "npm run lint && npm run test:mocha",
     "build": "tsc",
-    "prepack": "npm run test && npm run build"
+    "prepack": "npm run test && npm run build",
+    "testrun": "ts-node src/run.ts"
   },
   "keywords": [
     "pe",
@@ -28,6 +29,7 @@
   },
   "license": "Apache-2.0",
   "devDependencies": {
+    "@types/bignumber.js": "^5.0.0",
     "@types/chai": "^4.2.11",
     "@types/mocha": "^7.0.2",
     "@types/node": "^14.0.10",
@@ -39,5 +41,8 @@
     "ts-node": "^8.10.2",
     "tsc": "^1.20150623.0",
     "typescript": "^3.9.3"
+  },
+  "dependencies": {
+    "bignumber.js": "^9.0.0"
   }
 }

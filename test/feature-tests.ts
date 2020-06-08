@@ -68,6 +68,12 @@ describe('feature test', function () {
         .on('data-directories', (dataDirectories, next) => {
           next(dataDirectories);
         })
+        .on('before-table', (dataDirectory, next) => {
+          next(true);
+        })
+        .on('table', (tableInfo, next) => {
+          next();
+        })
         .on('before-finish', (next) => {
           next();
         })
@@ -169,6 +175,12 @@ describe('feature test', function () {
           next(dataDirectories);
         })
         .on('before-finish', (next) => {
+          next();
+        })
+        .on('before-table', (dataDirectory, next) => {
+          next(true);
+        })
+        .on('table', (tableInfo, next) => {
           next();
         })
         .on('data', (chunk) => {
