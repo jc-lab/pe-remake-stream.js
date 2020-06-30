@@ -309,7 +309,7 @@ export class PERemakeStream extends streams.Transform implements IPERemakeStream
             );
             this._checkAndResume(paused);
           } else {
-            const midBegin = Math.max(this._filePosition, currentDataDirectory.address);
+            const midBegin = Math.max(this._filePosition, rawAddress);
             const midEnd = Math.max(this._filePosition + chunkBuffer.readRemaining, rawAddress + currentDataDirectory.size);
             const midSize = midEnd - midBegin;
             const skipLength = midBegin - this._filePosition;
