@@ -107,3 +107,12 @@ dist
 .idea
 
 lib
+
+# yarn v2
+/.yarn/*
+!/.yarn/patches
+!/.yarn/plugins
+!/.yarn/releases
+!/.yarn/sdks
+.pnp.*
+
