@@ -22,7 +22,7 @@ describe('feature test', function () {
 
     const runList: number[] = [];
 
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const outputBufs: Buffer[] = [];
       inputStream
         .pipe(remakeStream)
@@ -42,15 +42,12 @@ describe('feature test', function () {
         })
         .on('finish', () => {
           runList.push(3);
-        })
-        .on('end', () => {
-          runList.push(4);
           output = Buffer.concat(outputBufs);
           resolve();
         });
     });
 
-    expect(runList).eql([1, 2, 3, 4]);
+    expect(runList).eql([1, 2, 3]);
   });
 
   it('32bit exe: passthrough', async function () {
@@ -58,7 +55,7 @@ describe('feature test', function () {
     const remakeStream = PERemakeStream();
     let output!: Buffer;
 
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const outputBufs: Buffer[] = [];
       inputStream
         .pipe(remakeStream)
@@ -68,19 +65,13 @@ describe('feature test', function () {
         .on('data-directories', (dataDirectories, next) => {
           next(dataDirectories);
         })
-        .on('before-table', (dataDirectory, next) => {
-          next(true);
-        })
-        .on('table', (tableInfo, next) => {
-          next();
-        })
         .on('before-finish', (next) => {
           next();
         })
         .on('data', (chunk) => {
           outputBufs.push(chunk);
         })
-        .on('end', () => {
+        .on('finish', () => {
           output = Buffer.concat(outputBufs);
           resolve();
         });
@@ -94,7 +85,7 @@ describe('feature test', function () {
     const remakeStream = PERemakeStream();
     let output!: Buffer;
 
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const outputBufs: Buffer[] = [];
       inputStream
         .pipe(remakeStream)
@@ -128,7 +119,7 @@ describe('feature test', function () {
 
     const runList: number[] = [];
 
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const outputBufs: Buffer[] = [];
       inputStream
         .pipe(remakeStream)
@@ -148,15 +139,12 @@ describe('feature test', function () {
         })
         .on('finish', () => {
           runList.push(3);
-        })
-        .on('end', () => {
-          runList.push(4);
           output = Buffer.concat(outputBufs);
           resolve();
         });
     });
 
-    expect(runList).eql([1, 2, 3, 4]);
+    expect(runList).eql([1, 2, 3]);
   });
 
   it('64bit exe: passthrough', async function () {
@@ -164,7 +152,7 @@ describe('feature test', function () {
     const remakeStream = PERemakeStream();
     let output!: Buffer;
 
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const outputBufs: Buffer[] = [];
       inputStream
         .pipe(remakeStream)
@@ -174,19 +162,10 @@ describe('feature test', function () {
         .on('data-directories', (dataDirectories, next) => {
           next(dataDirectories);
         })
-        .on('before-finish', (next) => {
-          next();
-        })
-        .on('before-table', (dataDirectory, next) => {
-          next(true);
-        })
-        .on('table', (tableInfo, next) => {
-          next();
-        })
         .on('data', (chunk) => {
           outputBufs.push(chunk);
         })
-        .on('end', () => {
+        .on('finish', () => {
           output = Buffer.concat(outputBufs);
           resolve();
         });
@@ -200,7 +179,7 @@ describe('feature test', function () {
     const remakeStream = PERemakeStream();
     let output!: Buffer;
 
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       const outputBufs: Buffer[] = [];
       inputStream
         .pipe(remakeStream)

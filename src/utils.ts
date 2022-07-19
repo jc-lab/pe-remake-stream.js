@@ -1,6 +1,6 @@
 import BigNumber from 'bignumber.js';
 import {
-  IImageFileHeader, IImageSectionHeader, IMAGE_SIZEOF_SHORT_NAME
+  IImageFileHeader, IImageOptionHeader, IImageSectionHeader, IMAGE_OPTIONAL_HEADER_MAGIC32, IMAGE_SIZEOF_SHORT_NAME
 } from './types';
 
 export function writeInt32ToBuffer(buffer: Buffer, offset: number, value: number) {
@@ -55,13 +55,21 @@ export function parseImageFileHeader(buffer: Buffer, offset: number): IImageFile
   };
 }
 
-export function parseImageSectionHeader(buffer: Buffer, offset: number): IImageSectionHeader {
+export function parseImageSectionHeader(buffer: Buffer, offset: number): IImageSectionHeader | false {
   let position = offset;
   const nameBuffer = buffer.slice(offset, offset + IMAGE_SIZEOF_SHORT_NAME);
   position += IMAGE_SIZEOF_SHORT_NAME;
 
+  let nameLength = nameBuffer.indexOf(0);
+  if (nameLength < 0) {
+    nameLength = nameBuffer.length;
+  }
+
+  const name = nameBuffer.subarray(0, nameLength).toString('utf-8');
+  if (name.length <= 0) return false;
+
   return {
-    name: nameBuffer.toString('utf-8'),
+    name,
     /* union { */
     physicalAddress: readUint32FromBuffer(buffer, position),
     virtualSize: readUint32FromBuffer(buffer, position),
@@ -75,6 +83,57 @@ export function parseImageSectionHeader(buffer: Buffer, offset: number): IImageS
     /* WORD */ numberOfLinenumbers: readUint16FromBuffer(buffer, position + 26),
     /* DWORD */ characteristics: readUint32FromBuffer(buffer, position + 28)
   };
+}
+
+export function parseImageOptionalHeader(buffer: Buffer, offset: number, magic: number): IImageOptionHeader {
+  let position = offset;
+  const result: IImageOptionHeader = {} as any;
+  result.magic = magic;
+  result.majorLinkerVersion = buffer[position + 0];
+  result.minorLinkerVersion = buffer[position + 1];
+  result.sizeOfCode = readUint32FromBuffer(buffer, position + 2);
+  result.sizeOfInitializedData = readUint32FromBuffer(buffer, position + 6);
+  result.sizeOfUninitializedData = readUint32FromBuffer(buffer, position + 10);
+  result.addressOfEntryPoint = readUint32FromBuffer(buffer, position + 14);
+  result.baseOfCode = readUint32FromBuffer(buffer, position + 18);
+  if (result.magic === IMAGE_OPTIONAL_HEADER_MAGIC32) {
+    result.baseOfData = readUint32FromBuffer(buffer, position + 22);
+    result.imageBase = new BigNumber(readUint32FromBuffer(buffer, position + 26));
+  } else {
+    result.imageBase = readUint64BNFromBuffer(buffer, position + 22);
+  }
+  result.sectionAlignment = readUint32FromBuffer(buffer, position + 30);
+  result.fileAlignment = readUint32FromBuffer(buffer, position + 34);
+  result.majorOperatingSystemVersion = readUint16FromBuffer(buffer, position + 38);
+  result.minorOperatingSystemVersion = readUint16FromBuffer(buffer, position + 40);
+  result.majorImageVersion = readUint16FromBuffer(buffer, position + 42);
+  result.minorImageVersion = readUint16FromBuffer(buffer, position + 44);
+  result.majorSubsystemVersion = readUint16FromBuffer(buffer, position + 46);
+  result.minorSubsystemVersion = readUint16FromBuffer(buffer, position + 48);
+  result.win32VersionValue = readUint32FromBuffer(buffer, position + 50);
+  result.sizeOfImage = readUint32FromBuffer(buffer, position + 54);
+  result.sizeOfHeaders = readUint32FromBuffer(buffer, position + 58);
+  result.checkSum = readUint32FromBuffer(buffer, position + 62);
+  result.subsystem = readUint16FromBuffer(buffer, position + 66);
+  result.dllCharacteristics = readUint16FromBuffer(buffer, position + 68);
+  position += 70;
+
+  if (result.magic === IMAGE_OPTIONAL_HEADER_MAGIC32) {
+    result.sizeOfStackReserve = readUint32BNFromBuffer(buffer, position); position += 4;
+    result.sizeOfStackCommit = readUint32BNFromBuffer(buffer, position); position += 4;
+    result.sizeOfHeapReserve = readUint32BNFromBuffer(buffer, position); position += 4;
+    result.sizeOfHeapCommit = readUint32BNFromBuffer(buffer, position); position += 4;
+  } else {
+    result.sizeOfStackReserve = readUint64BNFromBuffer(buffer, position); position += 8;
+    result.sizeOfStackCommit = readUint64BNFromBuffer(buffer, position); position += 8;
+    result.sizeOfHeapReserve = readUint64BNFromBuffer(buffer, position); position += 8;
+    result.sizeOfHeapCommit = readUint64BNFromBuffer(buffer, position); position += 8;
+  }
+
+  result.loaderFlags = readUint32FromBuffer(buffer, position); position += 4;
+  result.numberOfRvaAndSizes = readUint32FromBuffer(buffer, position); position += 4;
+
+  return result;
 }
 
 export class RWBuffer {
@@ -158,6 +217,18 @@ export class RWBuffer {
       src.buffer.copy(this.buffer, this._writePosition, src._readPosition, src._readPosition + avail);
     }
     src._incrementReadPosition(avail);
+    this._incrementWritePosition(avail);
+    return avail;
+  }
+
+  public writeFromBuffer(src: Buffer, offset: number, size?: number): number {
+    let avail = Math.min(src.length, this.writeRemaining);
+    if (typeof size !== 'undefined') {
+      avail = Math.min(avail, size);
+    }
+    if (this.buffer) {
+      src.copy(this.buffer, this._writePosition, offset, offset + avail);
+    }
     this._incrementWritePosition(avail);
     return avail;
   }

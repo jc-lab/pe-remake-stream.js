@@ -6,10 +6,14 @@ import {
   parseImageFileHeader,
   readUint32BNFromBuffer,
   readUint32FromBuffer,
-  writeInt32ToBuffer, parseImageSectionHeader
+  writeInt32ToBuffer, parseImageSectionHeader, parseImageOptionalHeader
 } from './utils';
 import {
-  IImageFileHeader, IImageSectionHeader
+  IImageFileHeader,
+  IImageOptionHeader,
+  IImageSectionHeader,
+  IMAGE_OPTIONAL_HEADER_MAGIC32,
+  IMAGE_OPTIONAL_HEADER_MAGIC64
 } from './types';
 
 enum ReadStatus {
@@ -21,6 +25,7 @@ enum ReadStatus {
   DATA_DIRECTORIES_A,
   DATA_DIRECTORIES_B,
   IMAGE_SECTION_HEADER,
+  HEADER_FOOTER,
   MIDDLE_PAYLOAD
 }
 
@@ -78,15 +83,21 @@ function isRangeInRange(bufferPosition: number, bufferEnd: number, targetBegin: 
   return (a && RangeCheckResult.OVER_TARGET_BEGIN || 0) | (b && RangeCheckResult.OVER_TARGET_END || 0);
 }
 
+interface ImageSectionReadContext extends IImageSectionHeader {
+  position: number;
+}
+
+interface TableReadContext {
+  dataDirectory: IDataDirectory;
+  buffer: RWBuffer;
+}
+
 export interface IPERemakeStreamEvents {
   emit(event: 'data-directories', item: IDataDirectory[], next: (replaced?: IDataDirectory[]) => void): boolean;
   on(event: 'data-directories', listener: (item: IDataDirectory[], next: (replaced?: IDataDirectory[]) => void) => void): this;
 
-  emit(event: 'before-table', type: IDataDirectory, next: (buffering?: boolean) => void): boolean;
-  on(event: 'before-table', listener: (type: IDataDirectory, next: (buffering?: boolean) => void) => void): this;
-
-  emit(event: 'table', table: ITableData, next: () => void): boolean;
-  on(event: 'table', listener: (table: ITableData, next: () => void) => void): this;
+  emit(event: 'table', table: ITableData): boolean;
+  on(event: 'table', listener: (table: ITableData) => void): this;
 
   emit(event: 'before-finish', next: () => void): boolean;
   on(event: 'before-finish', listener: (next: () => void) => void): this;
@@ -103,16 +114,17 @@ export class PERemakeStream extends streams.Transform implements IPERemakeStream
   private _runningBuffers: Buffer[] = [];
 
   private _imageFileHeader!: IImageFileHeader;
+  private _imageOptionalHeader!: IImageOptionHeader;
 
   private _peOffset: number = -1;
   private _optionalHeaderMagic: number = -1;
   private _optionalHeader!: Buffer;
 
-  private _imageSectionHeader!: IImageSectionHeader;
+  private _imageSectionHeaders: Record<string, IImageSectionHeader> = {};
+  private _remainingImageSections: IImageSectionHeader[] = [];
+  private _readingImageSection: ImageSectionReadContext | null = null;
 
-  private _imageBase!: BigNumber;
-
-  private _remainingDataDirectories: IDataDirectory[] = [];
+  private _tables: Record<DataDirectoryType, TableReadContext> = {} as any;
 
   constructor(streamOpts?: streams.TransformOptions) {
     super(streamOpts);
@@ -158,12 +170,8 @@ export class PERemakeStream extends streams.Transform implements IPERemakeStream
     this._readFlags &= ~flag;
   }
 
-  private rvaToRaw(rva: number): number {
-    // return new BigNumber(rva)
-    //   .minus(this._imageSectionHeader.virtualAddress)
-    //   .plus(this._imageSectionHeader.pointerToRawData)
-    // ;
-    return rva - this._imageSectionHeader.virtualAddress + this._imageSectionHeader.pointerToRawData;
+  private rvaToRaw(sectionHeader: IImageSectionHeader, rva: number): number {
+    return rva - sectionHeader.virtualAddress + sectionHeader.pointerToRawData;
   }
 
   private _verifyDosHeader(): Error | null {
@@ -213,7 +221,8 @@ export class PERemakeStream extends streams.Transform implements IPERemakeStream
   private _processDataDirectories(next: streams.TransformCallback) {
     const componentBuffer: RWBuffer = this._componentBuffer as RWBuffer;
     const dataDirectories: IDataDirectory[] = [];
-    for (let index = 0; index < 16; index++) {
+    const count = this._imageOptionalHeader.numberOfRvaAndSizes || 16;
+    for (let index = 0; index < count; index++) {
       const position = index * 8;
       const address = componentBuffer.readInt32At(position);
       const size = componentBuffer.readInt32At(position + 4);
@@ -224,17 +233,14 @@ export class PERemakeStream extends streams.Transform implements IPERemakeStream
       });
     }
 
-    this._remainingDataDirectories = dataDirectories
-      .filter(v => v.address && v.size)
-      .sort((x, y) => {
-        if (x.address > y.address) {
-          return 1;
-        } else if (x.address < y.address) {
-          return -1;
-        } else {
-          return 0;
-        }
-      });
+    this._tables = dataDirectories
+      .filter((v) => v.address && v.size)
+      .map((v) => {
+        return {
+          dataDirectory: v,
+          buffer: new RWBuffer(Buffer.alloc(v.size), v.size),
+        } as TableReadContext;
+      }) as any;
 
     const writeCallback = (replaced: IDataDirectory[]) => {
       this._pushReplacedDataDirectories(replaced || dataDirectories);
@@ -279,78 +285,112 @@ export class PERemakeStream extends streams.Transform implements IPERemakeStream
     }
   }
 
-  private _readingTableDirectory: IDataDirectory | null = null;
-  private _readingTableBuffer!: RWBuffer;
   private _proecssBuffer(chunkBuffer: RWBuffer, next: streams.TransformCallback) {
-    const loopCount = 0;
     while (chunkBuffer.readRemaining > 0) {
       if (!this._componentBuffer && (this._readFlags & ReadFlag.PASSTHROUGH)) {
-        const currentDataDirectory = (this._remainingDataDirectories.length > 0) && this._remainingDataDirectories[0];
-        const rawAddress = (currentDataDirectory && this.rvaToRaw(currentDataDirectory.address)) as number;
-        const testResult = currentDataDirectory && isRangeInRange(rawAddress, rawAddress + currentDataDirectory.size, this._filePosition, this._filePosition + chunkBuffer.readRemaining);
-        if (currentDataDirectory && testResult) {
-          if (!this._readingTableDirectory) {
-            // Start read table
-            const paused = this._checkAndPause(chunkBuffer);
-            const callback = (buffering?: boolean) => {
-              this._readingTableBuffer = new RWBuffer(
-                buffering && Buffer.alloc(currentDataDirectory.size) || null,
-                currentDataDirectory.size
-              );
-              this._checkAndResume(paused, next);
+        const certificateTable = Object.values(this._tables)
+          .find(v => v.dataDirectory.type === DataDirectoryType.CertificateTable && v.dataDirectory.address);
+
+        let tmpCurrentSection: ImageSectionReadContext | null = null;
+
+        const screenedPosition = this._filePosition;
+        let screenedBuffer!: Buffer;
+
+        if (this._readingImageSection) {
+          tmpCurrentSection = this._readingImageSection;
+        } else {
+          const firstSection = (this._remainingImageSections.length > 0) && this._remainingImageSections[0];
+          const sectionTestResult = firstSection && isRangeInRange(
+            firstSection.pointerToRawData,
+            firstSection.pointerToRawData + firstSection.sizeOfRawData,
+            this._filePosition,
+            this._filePosition + chunkBuffer.readRemaining
+          );
+          if (firstSection && sectionTestResult) {
+            tmpCurrentSection = {
+              ...firstSection,
+              position: 0,
             };
-            this._readingTableDirectory = currentDataDirectory;
-            if (this.emit('before-table', currentDataDirectory, callback)) {
-              return ;
-            }
-            this._readingTableBuffer = new RWBuffer(
-              null,
-              currentDataDirectory.size
-            );
-            this._checkAndResume(paused);
-          } else {
-            const midBegin = Math.max(this._filePosition, rawAddress);
-            const midEnd = Math.max(this._filePosition + chunkBuffer.readRemaining, rawAddress + currentDataDirectory.size);
-            const midSize = midEnd - midBegin;
-            const skipLength = midBegin - this._filePosition;
-            if (skipLength > 0) {
-              this.push(chunkBuffer.getRemainBuffer(skipLength));
-            }
-            if (!this._readingTableBuffer.hasBuffer) {
-              this.push(
-                this._readingTableBuffer.writeWithCopyFrom(chunkBuffer, midSize)
-              );
-            } else {
-              this._readingTableBuffer.writeFrom(chunkBuffer, midSize);
-            }
-            if (this._readingTableBuffer.writeRemaining === 0) {
-              if (this._readingTableBuffer.hasBuffer) {
-                const paused = this._checkAndPause(chunkBuffer);
-                const data = this._readingTableBuffer.buffer as Buffer;
-                const table: ITableData = {
-                  ...this._readingTableDirectory,
-                  data
-                };
-                const callback = () => {
-                  this.push(data);
-                  (this as any)._readingTableBuffer = null;
-                  this._readingTableDirectory = null;
-                  this._remainingDataDirectories.shift();
-                  this._checkAndResume(paused, next);
-                };
-                if (this.emit('table', table, callback)) {
-                  return;
+            this._readingImageSection = tmpCurrentSection;
+          }
+        }
+
+        if (tmpCurrentSection) {
+          const nextSection = (this._remainingImageSections.length > 1) && this._remainingImageSections[1];
+          const currentSection = tmpCurrentSection;
+          const sectionRemaining = currentSection.sizeOfRawData - currentSection.position;
+          const sectionChunkSize = Math.min(chunkBuffer.readRemaining, sectionRemaining);
+          const sectionStart = currentSection.virtualAddress;
+          const sectionEnd = nextSection ? nextSection.virtualAddress : (currentSection.virtualAddress + currentSection.sizeOfRawData);
+          const sectionChunkBuffer = chunkBuffer.getRemainBuffer(sectionChunkSize);
+          const sectionVirtualPosition = currentSection.virtualAddress + currentSection.position;
+
+          this.push(sectionChunkBuffer);
+          screenedBuffer = sectionChunkBuffer;
+
+          Object.values(this._tables)
+            .filter((v) => {
+              return v.dataDirectory.type !== DataDirectoryType.CertificateTable && sectionStart <= v.dataDirectory.address && v.dataDirectory.address <= sectionEnd;
+            })
+            .forEach((v) => {
+              let readPosition = 0;
+              if (sectionVirtualPosition < v.dataDirectory.address) {
+                const skipLength = v.dataDirectory.address - sectionVirtualPosition;
+                if (skipLength >= sectionChunkSize) {
+                  return ;
                 }
-                this.push(data);
-                this._checkAndResume(paused);
+                readPosition = skipLength;
+              } else if (v.buffer.writeRemaining === 0) {
+                return ;
               }
-              (this as any)._readingTableBuffer = null;
-              this._readingTableDirectory = null;
-              this._remainingDataDirectories.shift();
-            }
+
+              const tableAvail = Math.min(sectionChunkSize - readPosition, v.buffer.writeRemaining);
+              v.buffer.writeFromBuffer(sectionChunkBuffer, readPosition, tableAvail);
+              if (v.buffer.writeRemaining === 0) {
+                const table: ITableData = {
+                  ...v.dataDirectory,
+                  data: v.buffer.buffer as Buffer,
+                };
+                this.emit('table', table);
+              }
+            });
+
+          currentSection.position += sectionChunkSize;
+          if (currentSection.position === currentSection.sizeOfRawData) {
+            this._readingImageSection = null;
+            this._remainingImageSections.shift();
           }
         } else {
-          this.push(chunkBuffer.getRemainBuffer());
+          const buffer = chunkBuffer.getRemainBuffer();
+          screenedBuffer = buffer;
+          this.push(buffer);
+        }
+
+        if (certificateTable) {
+          do {
+            let readPosition = 0;
+            if (screenedPosition < certificateTable.dataDirectory.address) {
+              const skipLength = certificateTable.dataDirectory.address - screenedPosition;
+              if (skipLength >= screenedBuffer.length) {
+                break;
+              }
+              readPosition = skipLength;
+            }
+
+            if (certificateTable.buffer.writeRemaining === 0) {
+              break;
+            }
+
+            const tableAvail = Math.min(screenedBuffer.length - readPosition, certificateTable.buffer.writeRemaining);
+            certificateTable.buffer.writeFromBuffer(screenedBuffer, readPosition, tableAvail);
+            if (certificateTable.buffer.writeRemaining === 0) {
+              const table: ITableData = {
+                ...certificateTable.dataDirectory,
+                data: certificateTable.buffer.buffer as Buffer,
+              };
+              this.emit('table', table);
+            }
+          } while (0);
         }
       } else {
         if (this._readRemainingPayload(chunkBuffer)) {
@@ -398,13 +438,13 @@ export class PERemakeStream extends streams.Transform implements IPERemakeStream
             this._runningBuffers = [
               componentBuffer.buffer as Buffer
             ];
-            if (this._optionalHeaderMagic == 0x010B) {
+            if (this._optionalHeaderMagic == IMAGE_OPTIONAL_HEADER_MAGIC32) {
               this._startReadComponent(
                 ReadStatus.OPTIONAL_HEADER_B,
                 94,
                 ReadFlag.PASSTHROUGH
               );
-            } else if (this._optionalHeaderMagic == 0x020b) {
+            } else if (this._optionalHeaderMagic == IMAGE_OPTIONAL_HEADER_MAGIC64) {
               this._startReadComponent(
                 ReadStatus.OPTIONAL_HEADER_B,
                 110,
@@ -420,21 +460,7 @@ export class PERemakeStream extends streams.Transform implements IPERemakeStream
             this._runningBuffers.push(componentBuffer.buffer as Buffer);
             this._optionalHeader = Buffer.concat(this._runningBuffers);
 
-            if (this._optionalHeaderMagic == 0x010B) {
-              this._imageBase = readUint32BNFromBuffer(componentBuffer.buffer as Buffer, 28);
-              this._startReadComponent(
-                ReadStatus.OPTIONAL_HEADER_B,
-                94,
-                ReadFlag.DUMMY | ReadFlag.PASSTHROUGH
-              );
-            } else if (this._optionalHeaderMagic == 0x020b) {
-              this._imageBase = readUint32BNFromBuffer(componentBuffer.buffer as Buffer, 24);
-              this._startReadComponent(
-                ReadStatus.OPTIONAL_HEADER_B,
-                110,
-                ReadFlag.DUMMY | ReadFlag.PASSTHROUGH
-              );
-            }
+            this._imageOptionalHeader = parseImageOptionalHeader(componentBuffer.buffer as Buffer, 0, this._optionalHeaderMagic);
 
             this._startReadComponent(
               ReadStatus.DATA_DIRECTORIES_A,
@@ -452,20 +478,64 @@ export class PERemakeStream extends streams.Transform implements IPERemakeStream
             break;
 
           case ReadStatus.DATA_DIRECTORIES_B:
-            this._startReadComponent(
-              ReadStatus.IMAGE_SECTION_HEADER,
-              40,
-              ReadFlag.PASSTHROUGH
-            );
+            do {
+              let remainging = this._imageOptionalHeader.sizeOfHeaders;
+              remainging -= this._filePosition;
+              remainging -= 8 * 16;
+
+              this._runningBuffers = [];
+              this._startReadComponent(
+                ReadStatus.IMAGE_SECTION_HEADER,
+                remainging,
+                ReadFlag.PASSTHROUGH
+              );
+            } while (0);
             break;
 
           case ReadStatus.IMAGE_SECTION_HEADER:
-            this._imageSectionHeader = parseImageSectionHeader(componentBuffer.buffer as Buffer, 0);
-            this._startReadComponent(
-              ReadStatus.MIDDLE_PAYLOAD,
-              -1,
-              ReadFlag.DUMMY | ReadFlag.PASSTHROUGH
-            );
+            do {
+              const buffer = componentBuffer.buffer as Buffer;
+              let position = 0;
+
+              while (position < buffer.length) {
+                const sectionHeader = parseImageSectionHeader(buffer, position);
+                position += 40;
+                if (sectionHeader) {
+                  this._imageSectionHeaders[sectionHeader.name] = sectionHeader;
+                } else {
+                  break;
+                }
+              }
+
+              const remaining = this._imageOptionalHeader.sizeOfHeaders - this._filePosition;
+              this._startReadComponent(
+                ReadStatus.HEADER_FOOTER,
+                remaining,
+                ReadFlag.PASSTHROUGH
+              );
+
+              this._remainingImageSections = Object.values(this._imageSectionHeaders)
+                .sort((x, y) => {
+                  if (x.pointerToRawData > y.pointerToRawData) {
+                    return 1;
+                  } else if (x.pointerToRawData < y.pointerToRawData) {
+                    return -1;
+                  } else {
+                    return 0;
+                  }
+                });
+            } while (0);
+            break;
+
+          case ReadStatus.HEADER_FOOTER:
+            do {
+              this._startReadComponent(
+                ReadStatus.MIDDLE_PAYLOAD,
+                -1,
+                ReadFlag.DUMMY | ReadFlag.PASSTHROUGH
+              );
+              break;
+            } while (0);
             break;
           }
 
