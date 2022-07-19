@@ -2,10 +2,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
-import PERemakeStream from '../src/';
-import {
-  DataDirectoryType, IDataDirectory, ITableData
-} from '../lib';
+import PERemakeStream, {
+  DataDirectoryType, ITableData
+} from '../src/';
 
 const chai = require('chai');
 const expect = chai.expect;
